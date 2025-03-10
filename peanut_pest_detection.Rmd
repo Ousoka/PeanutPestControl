@@ -1,0 +1,304 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+
+```{r}
+#install.packages("xml2")
+#install.packages("ggplot2")
+#install.packages("dplyr")
+#install.packages("stringr")
+#install.packages("gridExtra")
+
+library(xml2)
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(gridExtra)
+
+
+```
+
+```{r}
+# Function to parse XML annotations
+parse_annotation <- function(xml_file) {
+  xml_data <- read_xml(xml_file)
+  
+  # Extract image filename
+  filename <- xml_text(xml_find_first(xml_data, ".//filename"))
+  width <- as.integer(xml_text(xml_find_first(xml_data, ".//size/width")))
+  height <- as.integer(xml_text(xml_find_first(xml_data, ".//size/height")))
+  
+  # Extract all objects in the image
+  objects <- xml_find_all(xml_data, ".//object")
+  data_list <- list()
+  
+  for (obj in objects) {
+    label <- xml_text(xml_find_first(obj, ".//name"))
+    xmin <- as.integer(xml_text(xml_find_first(obj, ".//bndbox/xmin")))
+    ymin <- as.integer(xml_text(xml_find_first(obj, ".//bndbox/ymin")))
+    xmax <- as.integer(xml_text(xml_find_first(obj, ".//bndbox/xmax")))
+    ymax <- as.integer(xml_text(xml_find_first(obj, ".//bndbox/ymax")))
+    
+    bbox_width <- xmax - xmin
+    bbox_height <- ymax - ymin
+    aspect_ratio <- bbox_width / bbox_height
+    
+    data_list <- append(data_list, list(data.frame(
+      filename = filename,
+      label = label,
+      xmin = xmin, ymin = ymin, xmax = xmax, ymax = ymax,
+      width = width, height = height,
+      bbox_width = bbox_width, bbox_height = bbox_height,
+      aspect_ratio = aspect_ratio
+    )))
+  }
+  
+  return(do.call(rbind, data_list))
+}
+
+```
+
+```{r}
+library(xml2)
+
+# Spécifiez le chemin du fichier
+xml_file <- "C:/Users/oklabo/Documents/PeanutPestControl/Detection/VOC2007/Annotations/IP000000110.xml"
+
+# Lire le fichier XML
+xml_data <- read_xml(xml_file)
+
+# Afficher la structure du fichier XML
+print(xml_data)
+
+```
+
+```{r}
+library(xml2)
+
+# Dossier contenant les fichiers XML
+xml_folder <- "C:/Users/oklabo/Documents/PeanutPestControl/Detection/VOC2007/Annotations"
+xml_files <- list.files(xml_folder, pattern = "\\.xml$", full.names = TRUE)
+
+# Fichier pour stocker les erreurs
+error_log <- "C:/Users/oklabo/Documents/PeanutPestControl/Detection/erreurs_xml.txt"
+
+# Supprimer l'ancien fichier d'erreurs s'il existe
+if (file.exists(error_log)) {
+  file.remove(error_log)
+}
+
+# Fonction pour tester chaque fichier XML et stocker les erreurs
+check_xml <- function(file) {
+  tryCatch({
+    read_xml(file)  # Essaye de lire le fichier XML
+  }, error = function(e) {
+    # Enregistre uniquement les fichiers corrompus
+    write(file, error_log, append = TRUE)
+  })
+}
+
+# Exécuter la vérification sur tous les fichiers XML
+invisible(lapply(xml_files, check_xml))
+
+cat("✅ Vérification terminée ! Les fichiers corrompus sont enregistrés dans:", error_log, "\n")
+
+
+```
+
+```{r}
+#C:/Users/oklabo/Documents/PeanutPestControl/Detection/VOC2007/Annotations/IP087000986.xml
+library(xml2)
+
+# Spécifiez le chemin du fichier
+xml_file <- "C:/Users/oklabo/Documents/PeanutPestControl/Detection/VOC2007/Annotations/IP087000986.xml"
+
+# Lire le fichier XML
+xml_data <- read_xml(xml_file)
+
+# Afficher la structure du fichier XML
+print(xml_data)
+
+```
+
+
+```{r}
+annotation_folder <- "C:/Users/oklabo/Documents/PeanutPestControl/Detection/VOC2007/Annotations"
+xml_files <- list.files(annotation_folder, pattern = "\\.xml$", full.names = TRUE)
+
+# Parse all annotations and combine into a dataframe
+annotations_df <- do.call(rbind, lapply(xml_files, parse_annotation))
+
+# Display summary
+head(annotations_df)
+summary(annotations_df)
+
+```
+
+```{r}
+#install.packages("dplyr")  # Installe le package (si ce n'est pas encore fait)
+library(dplyr)  # Charge le package pour utiliser %>%
+
+# Number of images
+num_images <- length(unique(annotations_df$filename))
+cat("Number of Images:", num_images, "\n")
+
+# Number of bounding boxes
+num_bboxes <- nrow(annotations_df)
+cat("Number of Bounding Boxes:", num_bboxes, "\n")
+
+# Unique labels
+unique_labels <- unique(annotations_df$label)
+cat("Unique Labels:", paste(unique_labels, collapse = ", "), "\n")
+
+# Count of each label
+label_counts <- annotations_df %>%
+  group_by(label) %>%
+  summarise(count = n())
+
+print(label_counts)
+
+```
+
+```{r}
+install.packages("ggplot2")  # Installe ggplot2 (si non installé)
+
+# Charger ggplot2
+library(ggplot2)
+
+# Graphique de distribution des classes
+ggplot(label_counts, aes(x = reorder(label, -count), y = count, fill = label)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "Class Distribution", x = "Label", y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+```{r}
+ggplot(annotations_df, aes(x = bbox_width)) +
+  geom_histogram(binwidth = 50, fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Bounding Box Width Distribution", x = "Width (pixels)", y = "Count")
+
+ggplot(annotations_df, aes(x = bbox_height)) +
+  geom_histogram(binwidth = 50, fill = "red", alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Bounding Box Height Distribution", x = "Height (pixels)", y = "Count")
+
+```
+
+```{r}
+ggplot(annotations_df, aes(x = aspect_ratio)) +
+  geom_histogram(binwidth = 0.1, fill = "green", alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Aspect Ratio Distribution (Width/Height)", x = "Aspect Ratio", y = "Count")
+
+```
+
+```{r}
+trainval_path <- "C:/Users/oklabo/Documents/PeanutPestControl/Detection/VOC2007/ImageSets/Main/trainval.txt"
+test_path <- "C:/Users/oklabo/Documents/PeanutPestControl/Detection/VOC2007/ImageSets/Main/test.txt"
+
+train_images <- readLines(trainval_path)
+test_images <- readLines(test_path)
+
+# Count how many images are in train and test
+cat("Training Images:", length(train_images), "\n")
+cat("Testing Images:", length(test_images), "\n")
+
+```
+
+```{r}
+install.packages("jpeg")  # Installe le package jpeg
+install.packages("gridExtra")  # Installe gridExtra (pour affichage multiple)
+
+# Charger les bibliothèques
+library(jpeg)
+library(grid)
+library(gridExtra)  # Utile pour afficher plusieurs images
+
+
+# Function to plot an image with bounding boxes
+plot_image <- function(image_path, bboxes) {
+  img <- jpeg::readJPEG(image_path)
+  img_raster <- rasterGrob(img, interpolate = TRUE)
+  
+  ggplot() +
+    annotation_custom(img_raster, xmin = 0, xmax = bboxes$width[1], ymin = 0, ymax = bboxes$height[1]) +
+    geom_rect(data = bboxes, aes(xmin = xmin, ymin = height - ymax, xmax = xmax, ymax = height - ymin), 
+              color = "red", fill = NA, size = 1) +
+    labs(title = paste("Labels:", paste(unique(bboxes$label), collapse = ", "))) +
+    theme_void()
+}
+
+# Show first 5 images
+image_folder <- "C:/Users/oklabo/Documents/PeanutPestControl/Detection/VOC2007/JPEGImages"
+sample_images <- unique(annotations_df$filename)[1:5]
+
+plots <- lapply(sample_images, function(img) {
+  img_path <- file.path(image_folder, img)
+  bboxes <- annotations_df[annotations_df$filename == img, ]
+  plot_image(img_path, bboxes)
+})
+
+grid.arrange(grobs = plots, ncol = 2)
+
+```
+
+```{r}
+# Show next 5 images
+sample_images <- unique(annotations_df$filename)[6:10]
+
+plots <- lapply(sample_images, function(img) {
+  img_path <- file.path(image_folder, img)
+  bboxes <- annotations_df[annotations_df$filename == img, ]
+  plot_image(img_path, bboxes)
+})
+
+grid.arrange(grobs = plots, ncol = 2)
+```
+
+```{r}
+# Split annotations into training and testing sets
+train_annotations <- annotations_df %>% filter(filename %in% train_images)
+test_annotations <- annotations_df %>% filter(filename %in% test_images)
+
+# Summary of training and testing sets
+cat("Training Set:\n")
+summary(train_annotations)
+
+cat("\nTesting Set:\n")
+summary(test_annotations)
+```
+
+```{r}
+# Convert bounding box coordinates to YOLO format (normalized)
+annotations_df <- annotations_df %>%
+  mutate(
+    x_center = (xmin + xmax) / 2 / width,
+    y_center = (ymin + ymax) / 2 / height,
+    bbox_width_norm = bbox_width / width,
+    bbox_height_norm = bbox_height / height
+  )
+
+# Display the first few rows of the modified dataframe
+head(annotations_df)
+```
+
+```{r}
+# Save the processed annotations to a CSV file
+write.csv(annotations_df, "C:/Users/oklabo/Documents/PeanutPestControl/Detection/processed_annotations.csv", row.names = FALSE)
+
+# Save the training and testing sets
+write.csv(train_annotations, "C:/Users/oklabo/Documents/PeanutPestControl/Detection/train_annotations.csv", row.names = FALSE)
+write.csv(test_annotations, "C:/Users/oklabo/Documents/PeanutPestControl/Detection/test_annotations.csv", row.names = FALSE)
+```
+
+```{r}
+
+```
+
