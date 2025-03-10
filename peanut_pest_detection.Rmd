@@ -299,6 +299,319 @@ write.csv(test_annotations, "C:/Users/oklabo/Documents/PeanutPestControl/Detecti
 ```
 
 ```{r}
+# Read the classes.txt file
+classes <- readLines("classes.txt")
+class_ids <- seq_along(classes) - 1  # Class IDs start from 0
+names(class_ids) <- sub("^\\d+\\s+", "", classes)  # Remove numbers and keep labels
+
+# Map labels to class IDs in annotations_df
+annotations_df <- annotations_df %>%
+  mutate(class_id = class_ids[label])
+```
+
+```{r}
+#install.packages("torch")
+library(torch)
+```
+
+```{r}
+# Define a simple YOLO-like model
+yolo_model <- nn_module(
+  initialize = function() {
+    # Backbone (feature extractor)
+    self$backbone <- nn_sequential(
+      nn_conv2d(3, 16, kernel_size = 3, stride = 1, padding = 1),  # Input: 3 channels (RGB)
+      nn_relu(),
+      nn_max_pool2d(kernel_size = 2, stride = 2),
+      nn_conv2d(16, 32, kernel_size = 3, stride = 1, padding = 1),
+      nn_relu(),
+      nn_max_pool2d(kernel_size = 2, stride = 2)
+    )
+    
+    # Detection head
+    self$detection_head <- nn_sequential(
+      nn_conv2d(32, 64, kernel_size = 3, stride = 1, padding = 1),
+      nn_relu(),
+      nn_conv2d(64, 5 + length(class_ids), kernel_size = 1, stride = 1)  # 5 for bbox + class probabilities
+    )
+  },
+  
+  forward = function(x) {
+    features <- self$backbone(x)
+    predictions <- self$detection_head(features)
+    return(predictions)
+  }
+)
+
+# Instantiate the model
+model <- yolo_model()
+```
+
+```{r}
+# Lire le fichier ligne par ligne
+classes_file <- "C:/Users/oklabo/Documents/PeanutPestControl/Detection/classes.txt"
+lines <- readLines(classes_file)
+
+# Séparer l'ID du label et nettoyer les tabulations/espaces
+classes_df <- do.call(rbind, lapply(lines, function(line) {
+  parts <- unlist(strsplit(line, " ", fixed = TRUE))  # Séparer par espace
+  id <- parts[1]  # Premier élément = ID
+  label_name <- paste(parts[-1], collapse = " ")  # Réassembler le nom
+  
+  # Nettoyer les tabulations et espaces en trop
+  label_name <- gsub("\t", "", label_name)  # Supprimer tabulations
+  label_name <- trimws(label_name)  # Supprimer espaces inutiles
+
+  return(data.frame(id = as.integer(id), label_name = label_name, stringsAsFactors = FALSE))
+}))
+
+# Afficher les premières lignes
+head(classes_df)
+
 
 ```
+
+```{r}
+# Convertir en liste pour un mapping rapide
+class_mapping <- setNames(classes_df$label_name, as.character(classes_df$id))
+
+# Vérifier les premières correspondances
+head(class_mapping)
+
+```
+
+```{r}
+parse_annotation <- function(xml_file, class_mapping) {
+  xml_data <- read_xml(xml_file)
+
+  filename <- xml_text(xml_find_first(xml_data, ".//filename"))
+  width <- as.integer(xml_text(xml_find_first(xml_data, ".//size/width")))
+  height <- as.integer(xml_text(xml_find_first(xml_data, ".//size/height")))
+
+  objects <- xml_find_all(xml_data, ".//object")
+  data_list <- list()
+
+  for (obj in objects) {
+    label_id <- as.integer(xml_text(xml_find_first(obj, ".//name"))) + 1  # 🔥 Ajouter +1
+
+    # Vérifier si l'ID existe dans le mapping
+    label_name <- ifelse(as.character(label_id) %in% names(class_mapping), class_mapping[[as.character(label_id)]], "Unknown")
+
+    xmin <- as.integer(xml_text(xml_find_first(obj, ".//bndbox/xmin")))
+    ymin <- as.integer(xml_text(xml_find_first(obj, ".//bndbox/ymin")))
+    xmax <- as.integer(xml_text(xml_find_first(obj, ".//bndbox/xmax")))
+    ymax <- as.integer(xml_text(xml_find_first(obj, ".//bndbox/ymax")))
+
+    bbox_width <- xmax - xmin
+    bbox_height <- ymax - ymin
+    aspect_ratio <- bbox_width / bbox_height
+
+    data_list <- append(data_list, list(data.frame(
+      filename = filename,
+      label_id = label_id,  # ID ajusté
+      label_name = label_name,
+      xmin = xmin, ymin = ymin, xmax = xmax, ymax = ymax,
+      width = width, height = height,
+      bbox_width = bbox_width, bbox_height = bbox_height,
+      aspect_ratio = aspect_ratio
+    )))
+  }
+
+  return(do.call(rbind, data_list))
+}
+
+```
+
+```{r}
+library(xml2)
+library(dplyr)
+
+# Dossier des annotations
+annotation_folder <- "C:/Users/oklabo/Documents/PeanutPestControl/Detection/VOC2007/Annotations"
+xml_files <- list.files(annotation_folder, pattern = "\\.xml$", full.names = TRUE)
+
+# Lire le fichier de mapping des classes
+classes_file <- "C:/Users/oklabo/Documents/PeanutPestControl/Detection/classes.txt"
+lines <- readLines(classes_file)
+
+# Création du mapping ID → Nom de classe
+class_mapping <- do.call(rbind, lapply(lines, function(line) {
+  parts <- unlist(strsplit(line, " ", fixed = TRUE))  
+  id <- as.integer(parts[1])  
+  label_name <- trimws(gsub("\t", "", paste(parts[-1], collapse = " ")))  
+  return(data.frame(id = id, label_name = label_name, stringsAsFactors = FALSE))
+}))
+class_mapping <- setNames(class_mapping$label_name, as.character(class_mapping$id))
+
+# Fonction pour extraire les annotations XML
+parse_annotation <- function(xml_file, class_mapping) {
+  xml_data <- read_xml(xml_file)
+  filename <- xml_text(xml_find_first(xml_data, ".//filename"))
+  width <- as.integer(xml_text(xml_find_first(xml_data, ".//size/width")))
+  height <- as.integer(xml_text(xml_find_first(xml_data, ".//size/height")))
+
+  objects <- xml_find_all(xml_data, ".//object")
+  data_list <- list()
+
+  for (obj in objects) {
+    label_id <- as.integer(xml_text(xml_find_first(obj, ".//name"))) + 1  # 🔥 Ajout +1 pour correspondre à classes.txt
+    label_name <- ifelse(as.character(label_id) %in% names(class_mapping), class_mapping[[as.character(label_id)]], "Unknown")
+
+    xmin <- as.integer(xml_text(xml_find_first(obj, ".//bndbox/xmin")))
+    ymin <- as.integer(xml_text(xml_find_first(obj, ".//bndbox/ymin")))
+    xmax <- as.integer(xml_text(xml_find_first(obj, ".//bndbox/xmax")))
+    ymax <- as.integer(xml_text(xml_find_first(obj, ".//bndbox/ymax")))
+
+    data_list <- append(data_list, list(data.frame(
+      filename = filename,
+      label_id = label_id,
+      label_name = label_name,
+      xmin = xmin, ymin = ymin, xmax = xmax, ymax = ymax,
+      width = width, height = height
+    )))
+  }
+  return(do.call(rbind, data_list))
+}
+
+# Parser toutes les annotations XML
+annotations_df <- do.call(rbind, lapply(xml_files, function(file) parse_annotation(file, class_mapping)))
+
+# Afficher les premières lignes
+head(annotations_df)
+
+
+```
+
+```{r}
+# Dossier des images
+image_folder <- "C:/Users/oklabo/Documents/PeanutPestControl/Detection/VOC2007/JPEGImages"
+image_files <- list.files(image_folder, pattern = "\\.jpg$", full.names = TRUE)
+
+# Vérifier quelles images ont des annotations
+annotations_df$image_path <- file.path(image_folder, annotations_df$filename)
+
+# Filtrer uniquement les images qui existent
+annotations_df <- annotations_df[file.exists(annotations_df$image_path), ]
+
+# Afficher les premières lignes avec le chemin complet
+head(annotations_df)
+
+```
+
+```{r}
+library(jpeg)
+library(gridExtra)
+library(grid)
+
+# Fonction pour afficher une image avec ses bounding boxes
+plot_image <- function(image_path, bboxes) {
+  img <- jpeg::readJPEG(image_path)
+  img_raster <- rasterGrob(img, interpolate = TRUE)
+
+  ggplot() +
+    annotation_custom(img_raster, xmin = 0, xmax = bboxes$width[1], ymin = 0, ymax = bboxes$height[1]) +
+    geom_rect(data = bboxes, aes(xmin = xmin, ymin = height - ymax, xmax = xmax, ymax = height - ymin), 
+              color = "red", fill = NA, size = 1) +
+    labs(title = paste("Labels:", paste(unique(bboxes$label_name), collapse = ", "))) +
+    theme_void()
+}
+
+# Sélectionner quelques images pour affichage
+sample_images <- unique(annotations_df$filename)[1:5]
+
+plots <- lapply(sample_images, function(img) {
+  img_path <- file.path(image_folder, img)
+  bboxes <- annotations_df[annotations_df$filename == img, ]
+  plot_image(img_path, bboxes)
+})
+
+# Afficher les images avec les labels et bounding boxes
+grid.arrange(grobs = plots, ncol = 2)
+
+```
+
+```{r}
+#install.packages("torch")
+#install.packages("torchvision")
+#install.packages("dplyr")
+#install.packages("magrittr")  # Pour le pipe `%>%`
+#install.packages("ggplot2")
+#install.packages("data.table") # Pour manipulation rapide des données
+#install.packages("data.table")  # Installe le package (si ce n'est pas encore fait)
+#install.packages("jpeg")
+#install.packages("magick")  
+#install.packages("torch")
+#install.packages("torchvision")
+#install.packages("xml2")  # Installer xml2 (si non installé)
+
+
+```
+
+```{r}
+library(torch)
+library(torchvision)
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(data.table)
+library(xml2)  # Charger xml2
+library(jpeg)
+library(magick)
+
+```
+
+```{r}
+# Dossier des annotations et images
+annotation_folder <- "C:/Users/oklabo/Documents/PeanutPestControl/Detection/VOC2007/Annotations"
+image_folder <- "C:/Users/oklabo/Documents/PeanutPestControl/Detection/VOC2007/JPEGImages"
+
+# Lire les annotations XML
+parse_annotation <- function(xml_file) {
+  xml_data <- read_xml(xml_file)
+  filename <- xml_text(xml_find_first(xml_data, ".//filename"))
+  width <- as.integer(xml_text(xml_find_first(xml_data, ".//size/width")))
+  height <- as.integer(xml_text(xml_find_first(xml_data, ".//size/height")))
+
+  objects <- xml_find_all(xml_data, ".//object")
+  data_list <- list()
+
+  for (obj in objects) {
+    label_id <- as.integer(xml_text(xml_find_first(obj, ".//name"))) + 1  # 🔥 Correction index +1
+    xmin <- as.integer(xml_text(xml_find_first(obj, ".//bndbox/xmin")))
+    ymin <- as.integer(xml_text(xml_find_first(obj, ".//bndbox/ymin")))
+    xmax <- as.integer(xml_text(xml_find_first(obj, ".//bndbox/xmax")))
+    ymax <- as.integer(xml_text(xml_find_first(obj, ".//bndbox/ymax")))
+
+    data_list <- append(data_list, list(data.table(
+      filename = filename,
+      label_id = label_id,
+      xmin = xmin, ymin = ymin, xmax = xmax, ymax = ymax,
+      width = width, height = height
+    )))
+  }
+  return(rbindlist(data_list))
+}
+
+# Convertir toutes les annotations
+xml_files <- list.files(annotation_folder, pattern = "\\.xml$", full.names = TRUE)
+annotations_df <- rbindlist(lapply(xml_files, parse_annotation))
+
+# Ajouter le chemin des images
+annotations_df$image_path <- file.path(image_folder, annotations_df$filename)
+
+# Filtrer pour garder uniquement les images qui existent
+annotations_df <- annotations_df[file.exists(annotations_df$image_path), ]
+
+# Afficher les premières lignes
+head(annotations_df)
+
+```
+
+```{r}
+install.packages("magrittr")  # Pipe `%>%`
+
+
+```
+
+
 
