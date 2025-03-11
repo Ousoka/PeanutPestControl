@@ -614,4 +614,203 @@ install.packages("magrittr")  # Pipe `%>%`
 ```
 
 
+```{r}
+# Installation des packages si nécessaire
+# install.packages(c("torch", "torchvision", "dplyr", "magrittr", "ggplot2", "data.table", "xml2", "jpeg", "magick"))
+# Charger les bibliothèques
+library(torch)
+library(torchvision)
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(data.table)
+library(xml2)
+library(jpeg)
+library(magick)
+```
+
+```{r}
+# Dossiers des données
+annotation_folder <- "C:/Users/oklabo/Documents/PeanutPestControl/Detection/VOC2007/Annotations"
+image_folder <- "C:/Users/oklabo/Documents/PeanutPestControl/Detection/VOC2007/JPEGImages"
+trainval_path <- "C:/Users/oklabo/Documents/PeanutPestControl/Detection/VOC2007/ImageSets/Main/trainval.txt"
+test_path <- "C:/Users/oklabo/Documents/PeanutPestControl/Detection/VOC2007/ImageSets/Main/test.txt"
+
+# Lire les fichiers train/test
+train_images <- readLines(trainval_path)
+test_images <- readLines(test_path)
+
+# Fonction pour parser les annotations XML
+parse_annotation <- function(xml_file) {
+  xml_data <- read_xml(xml_file)
+  filename <- xml_text(xml_find_first(xml_data, ".//filename"))
+  width <- as.integer(xml_text(xml_find_first(xml_data, ".//size/width")))
+  height <- as.integer(xml_text(xml_find_first(xml_data, ".//size/height")))
+  
+  objects <- xml_find_all(xml_data, ".//object")
+  data_list <- list()
+  
+  for (obj in objects) {
+    label_id <- as.integer(xml_text(xml_find_first(obj, ".//name")))  # ID commence à 0
+    xmin <- as.integer(xml_text(xml_find_first(obj, ".//bndbox/xmin")))
+    ymin <- as.integer(xml_text(xml_find_first(obj, ".//bndbox/ymin")))
+    xmax <- as.integer(xml_text(xml_find_first(obj, ".//bndbox/xmax")))
+    ymax <- as.integer(xml_text(xml_find_first(obj, ".//bndbox/ymax")))
+    
+    # Normalisation pour YOLO
+    x_center <- (xmin + xmax) / 2 / width
+    y_center <- (ymin + ymax) / 2 / height
+    bbox_width <- (xmax - xmin) / width
+    bbox_height <- (ymax - ymin) / height
+    
+    data_list <- append(data_list, list(data.table(
+      filename = filename,
+      label_id = label_id,
+      x_center = x_center, y_center = y_center,
+      bbox_width = bbox_width, bbox_height = bbox_height,
+      width = width, height = height
+    )))
+  }
+  return(rbindlist(data_list))
+}
+
+# Parser toutes les annotations
+xml_files <- list.files(annotation_folder, pattern = "\\.xml$", full.names = TRUE)
+annotations_df <- rbindlist(lapply(xml_files, parse_annotation))
+
+# Ajouter les chemins d'images
+annotations_df$image_path <- file.path(image_folder, annotations_df$filename)
+
+# Séparer en train et test
+train_annotations <- annotations_df[annotations_df$filename %in% train_images, ]
+test_annotations <- annotations_df[annotations_df$filename %in% test_images, ]
+
+# Vérifier les données
+cat("Nombre d'images d'entraînement :", length(unique(train_annotations$filename)), "\n")
+cat("Nombre d'images de test :", length(unique(test_annotations$filename)), "\n")
+```
+
+```{r}
+# Dataset personnalisé
+PeanutDataset <- dataset(
+  name = "PeanutDataset",
+  
+  initialize = function(annotations, transform = NULL) {
+    self$annotations <- annotations
+    self$transform <- transform
+  },
+  
+  .getitem = function(index) {
+    # Charger l'image
+    img_path <- self$annotations$image_path[index]
+    img <- image_read(img_path) %>% 
+      image_to_tensor() %>% 
+      transform_to_tensor()
+    
+    # Normaliser l'image (0-1)
+    img <- img / 255
+    
+    # Récupérer les annotations
+    bboxes <- self$annotations[index, .(label_id, x_center, y_center, bbox_width, bbox_height)]
+    
+    # Convertir en tenseur
+    target <- torch_tensor(as.matrix(bboxes), dtype = torch_float())
+    
+    if (!is.null(self$transform)) {
+      img <- self$transform(img)
+    }
+    
+    return(list(image = img, target = target))
+  },
+  
+  .length = function() {
+    nrow(self$annotations)
+  }
+)
+
+# Créer les datasets
+train_dataset <- PeanutDataset(train_annotations)
+test_dataset <- PeanutDataset(test_annotations)
+
+# Créer les DataLoaders
+train_loader <- dataloader(train_dataset, batch_size = 4, shuffle = TRUE)
+test_loader <- dataloader(test_dataset, batch_size = 4, shuffle = FALSE)
+```
+
+```{r}
+# Modèle YOLO simplifié
+YoloModel <- nn_module(
+  initialize = function(num_classes) {
+    self$backbone <- nn_sequential(
+      nn_conv2d(3, 16, kernel_size = 3, stride = 1, padding = 1),
+      nn_relu(),
+      nn_max_pool2d(kernel_size = 2, stride = 2),
+      nn_conv2d(16, 32, kernel_size = 3, stride = 1, padding = 1),
+      nn_relu(),
+      nn_max_pool2d(kernel_size = 2, stride = 2),
+      nn_conv2d(32, 64, kernel_size = 3, stride = 1, padding = 1),
+      nn_relu()
+    )
+    
+    # Tête de détection : 5 (bbox + confiance) + num_classes
+    self$detection_head <- nn_sequential(
+      nn_conv2d(64, 5 + num_classes, kernel_size = 1, stride = 1)
+    )
+  },
+  
+  forward = function(x) {
+    features <- self$backbone(x)
+    predictions <- self$detection_head(features)
+    return(predictions)
+  }
+)
+
+# Nombre de classes (à adapter selon classes.txt)
+num_classes <- length(unique(annotations_df$label_id))
+model <- YoloModel(num_classes)
+```
+
+```{r}
+# Fonction de perte YOLO simplifiée
+yolo_loss <- function(pred, target, grid_size = 7) {
+  batch_size <- pred$size(1)
+  S <- grid_size  # Taille de la grille (exemple : 7x7)
+  
+  # Réorganiser les prédictions
+  pred <- pred$view(c(batch_size, S, S, 5 + num_classes))
+  
+  # Extraire les composantes
+  pred_xy <- pred[,,,1:2]  # x_center, y_center
+  pred_wh <- pred[,,,3:4]  # width, height
+  pred_conf <- pred[,,,5]  # Confiance
+  pred_cls <- pred[,,,6:(5 + num_classes)]  # Probabilités des classes
+  
+  # Perte de localisation
+  loc_loss <- nnf_mse_loss(pred_xy, target[,,1:2], reduction = "sum") +
+              nnf_mse_loss(pred_wh, target[,,3:4], reduction = "sum")
+  
+  # Perte de confiance (simplifiée)
+  conf_loss <- nnf_binary_cross_entropy_with_logits(pred_conf, torch_ones_like(pred_conf), reduction = "sum")
+  
+  # Perte de classification
+  cls_loss <- nnf_cross_entropy(pred_cls$view(c(-1, num_classes)), target[,,1]$long() + 1, reduction = "sum")
+  
+  # Combinaison des pertes
+  total_loss <- loc_loss + conf_loss + cls_loss
+  return(total_loss)
+}
+```
+
+```{r}
+
+# Install devtools if not already installed
+if (!require(devtools)) install.packages("devtools")
+
+# Install image.darknet from GitHub
+devtools::install_github("bnosac/image", subdir = "image.darknet", build_vignettes = TRUE)
+
+# Load the library
+library(image.darknet)
+
+```
 
