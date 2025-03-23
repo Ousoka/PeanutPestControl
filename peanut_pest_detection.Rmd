@@ -803,13 +803,13 @@ yolo_loss <- function(pred, target, grid_size = 7) {
 
 ```{r}
 
-# Install devtools if not already installed
+# Installer devtools si ce n’est pas déjà fait
 if (!require(devtools)) install.packages("devtools")
 
-# Install image.darknet from GitHub
+# Installer image.darknet depuis GitHub
 devtools::install_github("bnosac/image", subdir = "image.darknet", build_vignettes = TRUE)
 
-# Load the library
+# Charger le package
 library(image.darknet)
 
 ```
