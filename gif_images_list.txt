@@ -1,0 +1,3 @@
+./aphids\Image_115 (1).gif
+./aphids\Image_115 (2).gif
+./aphids\Image_115.gif
